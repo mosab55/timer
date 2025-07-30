@@ -1,4 +1,4 @@
-/*! For license information please see worker.min.js.LICENSE.txt */
+هاي
 !function() {
     var e = {
         7757: function(e, t, n) {
