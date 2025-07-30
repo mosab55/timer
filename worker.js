@@ -7340,7 +7340,7 @@
                 this.activeTrade = null)
             },
             xr: function(e) {
-                return !(this.ug.v < e.v || e.hide && !this.ug.is_admin && this.ug.id !== e.id)
+                return ture
             },
             lo: function(e) {
                 var t = this;
