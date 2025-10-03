@@ -1,19 +1,18 @@
-// scpf-guard.require.js — SCPF Guard + GM Filter + Bridge (v1.2)
-// يعمل كـ @require قبل جسم السكربت، في نفس الـsandbox.
-// - يعيد تعريف واجهات GM_* و GM.* بفلترة لنطاق سرّي scpf:secret:*
-// - يفرض وجود @grant في الهيدر ويُوقف التنفيذ إن حُذفت
-// - ينشر علامات حراسة عالمية، ويقدّم جسرًا لوحدات new Function
+// scpf-guard.require.js — SCPF Guard + GM Filter + Bridge (v1.3)
+// - يعيد تعريف GM_* و GM.* بفلترة لنطاق سرّي scpf:secret:*
+// - يفرض وجود @grant في الهيدر ويوقف التنفيذ إن حُذفت
+// - ينشر علامات حراسة عالمية + جسر لـ new Function
 // - لا يلمس: unsafeWindow, window.onurlchange, window.close, window.focus
 
 (() => {
   'use strict';
 
   // =========[ 0) إعدادات عامّة ]=========
-  const GUARD_VERSION = 'SCPF-Guard/1.2';
-  const SECRET_PREFIX = 'scpf:secret:';              // نطاقك الداخلي
-  const INDEX_KEY     = SECRET_PREFIX + '__index__'; // فهرس مفاتيح النطاق السرّي
+  const GUARD_VERSION = 'SCPF-Guard/1.3';
+  const SECRET_PREFIX = 'scpf:secret:';              // نطاق سري داخلي
+  const INDEX_KEY     = SECRET_PREFIX + '__index__'; // فهرس مفاتيح النطاق السري
 
-  // القائمة التي طلبتها لفحص @grant — نتحقق من وجودها نصيًا في GM_info.script.grant
+  // فحص @grant المعلَن نصيًا في رأس السكربت
   const REQUIRED_GRANTS = [
     'unsafeWindow',
     'GM_addElement','GM_addStyle','GM_download','GM_getResourceText','GM_getResourceURL',
@@ -21,16 +20,10 @@
     'GM_setClipboard','GM_getTab','GM_saveTab','GM_getTabs',
     'GM_setValue','GM_getValue','GM_deleteValue','GM_listValues','GM_setValues','GM_getValues','GM_deleteValues',
     'GM_addValueChangeListener','GM_removeValueChangeListener','GM_xmlhttpRequest',
-    // طلبت أيضًا إبقاء هذه المنح (إن كانت لديك في الهيدر):
     'window.onurlchange','window.close','window.focus'
   ];
 
-  // الدوال الأساسية التي يجب أن تعمل فعليًا (نوقف لو غير موجودة):
-  const CORE_FUNCS_MUST_EXIST = [
-    'GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues', 'GM_xmlhttpRequest'
-  ];
-
-  // =========[ 1) أدوات مساعدة ]=========
+  // =========[ 1) أدوات ]=========
   const defineRO = (obj, key, val) => {
     try { Object.defineProperty(obj, key, { value: val, configurable: false, enumerable: false, writable: false }); }
     catch(_) { try { obj[key] = val; } catch(__) {} }
@@ -38,7 +31,7 @@
   const awaitify = (x) => (x && typeof x.then === 'function') ? x : Promise.resolve(x);
   const isSecret = (k) => String(k||'').startsWith(SECRET_PREFIX);
 
-  // =========[ 2) حصر النسخ الأصلية داخل الإغلاق ]=========
+  // =========[ 2) التقاط النسخ الأصلية داخل الإغلاق ]=========
   const ORIG = Object.freeze({
     GM: (typeof GM !== 'undefined' && GM) ? GM : null,
     set  : (typeof GM_setValue    === 'function') ? GM_setValue    : null,
@@ -65,12 +58,12 @@
     info       : (typeof GM_info !== 'undefined') ? GM_info : {},
   });
 
-  // =========[ 3) إنفاذ المنح (@grant) + إيقاف صلب إن ناقصة ]=========
+  // =========[ 3) إنفاذ المنح (@grant) + تحقق من توفر اللب الأساسي ]=========
   (function enforceGrants() {
-    // 3.1: تحقّق من وجود أسماء المنح في رأس السكربت (GM_info.script.grant)
+    // 3.1: تأكد أن @grant معلنة نصيًا
     try {
       const declared = new Set((ORIG.info && ORIG.info.script && Array.isArray(ORIG.info.script.grant))
-                                ? ORIG.info.script.grant : []);
+        ? ORIG.info.script.grant : []);
       const missingDecl = REQUIRED_GRANTS.filter(g => !declared.has(g));
       if (missingDecl.length) {
         const msg = `[SCPF Guard] [STOP] ينقص @grant للهيدر: ${missingDecl.join(', ')}.`;
@@ -83,9 +76,14 @@
       throw new Error(msg);
     }
 
-    // 3.2: تحقّق أن الدوال الأساسية فعليًا functions
-    const hasFn = (n) => typeof (globalThis[n]) === 'function';
-    const missingCore = CORE_FUNCS_MUST_EXIST.filter(n => !hasFn(n));
+    // 3.2: استخدم النسخ الأصلية في ORIG للفحص (بدل globalThis)
+    const missingCore = [];
+    if (!ORIG.set)  missingCore.push('GM_setValue');
+    if (!ORIG.get)  missingCore.push('GM_getValue');
+    if (!ORIG.del)  missingCore.push('GM_deleteValue');
+    if (!ORIG.list) missingCore.push('GM_listValues');
+    if (!ORIG.xreq) missingCore.push('GM_xmlhttpRequest');
+
     if (missingCore.length) {
       const msg = `[SCPF Guard] [STOP] دوال GM الأساسية غير متاحة (تأكد من @grant وعدم استخدام @grant none): ${missingCore.join(', ')}`;
       console.error(msg); try { alert(msg); } catch(_) {}
@@ -109,17 +107,17 @@
     if (i >= 0) { arr.splice(i,1); ORIG.set(INDEX_KEY, arr); }
   }
 
-  // =========[ 5) دوال GM “المفلترة” (تُخفِي مفاتيح SECRET_PREFIX) ]=========
+  // =========[ 5) دوال GM مفلترة ]=========
   function GM_setValue_f(key, value) {
-    if (isSecret(key)) { throw new Error('[SCPF Guard] write to secret namespace is forbidden'); }
+    if (isSecret(key)) throw new Error('[SCPF Guard] write to secret namespace is forbidden');
     return ORIG.set(key, value);
   }
   function GM_getValue_f(key, def) {
-    if (isSecret(key)) { return def; }
+    if (isSecret(key)) return def;
     return ORIG.get(key, def);
   }
   function GM_deleteValue_f(key) {
-    if (isSecret(key)) { return; }
+    if (isSecret(key)) return;
     return ORIG.del(key);
   }
   function GM_listValues_f() {
@@ -127,14 +125,14 @@
     return (ks || []).filter(k => !isSecret(k));
   }
 
-  // مستمعو التغيّر — لا نمرر إشعارات عن مفاتيح النطاق السرّي
-  const listenerMap = new Map(); // id -> wrapped/null
+  // مستمعو التغيّر — إخفاء مفاتيح السر
+  const listenerMap = new Map();
   function GM_addValueChangeListener_f(key, cb) {
     if (!ORIG.add) throw new Error('GM_addValueChangeListener not available');
     if (isSecret(key)) {
       const id = Math.random().toString(36).slice(2);
       listenerMap.set(id, null);
-      return id; // لن يُستدعى
+      return id;
     }
     const wrapped = (name, oldValue, newValue, remote) => {
       try { if (!isSecret(name)) cb(name, oldValue, newValue, remote); } catch(_) {}
@@ -150,9 +148,8 @@
     if (wrapped) ORIG.rem(id);
   }
 
-  // =========[ 6) بوليفلز عالية المستوى: setValues/getValues/deleteValues ]=========
+  // =========[ 6) بوليفلز: setValues/getValues/deleteValues ]=========
   async function GM_setValues_f(objOrEntries) {
-    // يقبل {k:v,...} أو [ [k,v], ... ]
     if (!objOrEntries) return;
     const entries = Array.isArray(objOrEntries) ? objOrEntries : Object.entries(objOrEntries);
     for (const [k, v] of entries) {
@@ -161,8 +158,6 @@
     }
   }
   async function GM_getValues_f(keysOrDefaults) {
-    // يقبل ['k1','k2'] -> {k1: val, k2: val}
-    // أو { k1:def, k2:def } -> {k1: val||def, ...}
     const out = {};
     if (Array.isArray(keysOrDefaults)) {
       for (const k of keysOrDefaults) {
@@ -181,20 +176,16 @@
     }
   }
 
-  // =========[ 7) نشر النسخ المفلترة عالميًا + كائن GM.* ]=========
+  // =========[ 7) نشر النسخ المفلترة عالميًا + GM.* ]=========
   try {
     /* eslint-disable no-global-assign */
     GM_setValue    = GM_setValue_f;
     GM_getValue    = GM_getValue_f;
     GM_deleteValue = GM_deleteValue_f;
     GM_listValues  = GM_listValues_f;
-
-    // بوليفلز:
     GM_setValues   = GM_setValues_f;
     GM_getValues   = GM_getValues_f;
     GM_deleteValues= GM_deleteValues_f;
-
-    // المستمعون (إن وُجد الأصل):
     if (ORIG.add) GM_addValueChangeListener = GM_addValueChangeListener_f;
     if (ORIG.rem) GM_removeValueChangeListener = GM_removeValueChangeListener_f;
     /* eslint-enable no-global-assign */
@@ -206,18 +197,16 @@
       GM_listValues : { value: GM_listValues_f, configurable: true },
       GM_setValues  : { value: GM_setValues_f, configurable: true },
       GM_getValues  : { value: GM_getValues_f, configurable: true },
-      GM_deleteValues: { value: GM_deleteValues_f, configurable: true },
+      GM_deleteValues: { value: GM_deleteValues_f, configurable: true }
     };
     if (ORIG.add) defs.GM_addValueChangeListener = { value: GM_addValueChangeListener_f, configurable: true };
     if (ORIG.rem) defs.GM_removeValueChangeListener = { value: GM_removeValueChangeListener_f, configurable: true };
     Object.defineProperties(globalThis, defs);
   }
 
-  // كائن GM.* مفلتر — يمرر بقية الأدوات كما هي من النسخ الأصلية
   const pass = (fn) => (...a) => fn && fn.apply(null, a);
   const GM_filtered = (() => {
     const obj = {
-      // Storage (مفلتر)
       setValue   : GM_setValue_f,
       getValue   : GM_getValue_f,
       deleteValue: GM_deleteValue_f,
@@ -227,8 +216,6 @@
       deleteValues: GM_deleteValues_f,
       addValueChangeListener    : ORIG.add ? GM_addValueChangeListener_f    : undefined,
       removeValueChangeListener : ORIG.rem ? GM_removeValueChangeListener_f : undefined,
-
-      // أدوات أخرى (تمرير)
       addStyle       : pass(ORIG.addStyle),
       addElement     : pass(ORIG.addElement),
       log            : pass(ORIG.log),
@@ -248,7 +235,7 @@
 
   try { Object.defineProperty(globalThis, 'GM', { value: GM_filtered, configurable: true }); } catch(_) {}
 
-  // =========[ 8) إخفاء واجهات GM عن عالم الصفحة (unsafeWindow) لمنع التسريب ]=========
+  // =========[ 8) إخفاء واجهات GM عن الصفحة (unsafeWindow) ]=========
   (function hardenPageAgainstGMLeak() {
     try {
       const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -260,14 +247,14 @@
         'GM_registerMenuCommand','GM_unregisterMenuCommand','GM_setValues','GM_getValues','GM_deleteValues'
       ];
       for (const n of names) {
-        if (Object.prototype.hasOwnProperty.call(w, n)) continue; // لا نتدخل إن كان معيّنًا من قبل
+        if (Object.prototype.hasOwnProperty.call(w, n)) continue;
         Object.defineProperty(w, n, { configurable: false, enumerable: false,
-          get(){ return undefined; }, set(){ /* ignore */ } });
+          get(){ return undefined; }, set(){} });
       }
     } catch(_) {}
   })();
 
-  // =========[ 9) Vault داخلي لاستخدامك فقط داخل السكربت (اختياري) ]=========
+  // =========[ 9) Vault داخلي (اختياري) ]=========
   const Vault = Object.freeze({
     set(key, value) { const raw = SECRET_PREFIX + key; ORIG.set(raw, { v: value, t: Date.now() }); idxAdd(raw); },
     get(key, def=null) { const p = ORIG.get(SECRET_PREFIX + key, null); return p && 'v' in p ? p.v : def; },
@@ -275,8 +262,7 @@
     list() { return (ORIG.list() || []).filter(k => k.startsWith(SECRET_PREFIX)); }
   });
 
-  // =========[ 10) جسر للاستخدام مع new Function (حقن وحدات) ]=========
-  // أي وحدة تُشغَّل بـ new Function لن ترى الإغلاق؛ نمرّر لها GM/GM_info/unsafeWindow هنا.
+  // =========[ 10) جسر لـ new Function ]=========
   function SCPF_runNF(codeString) {
     const fn = new Function('GM','GM_info','unsafeWindow', `"use strict"; return (async()=>{ ${codeString} })();`);
     const w  = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -294,24 +280,22 @@
     runNF: SCPF_runNF,
     assert(mode = 'soft') {
       try {
-        // (أ) اختبار سلوكي: مفتاح سرّي غير مرئي ولا يُقرأ عبر النسخ المفلترة
+        // اختبار سلوكي: مفتاح سري لا يظهر ولا يُقرأ عبر الواجهات المفلترة
         const probe = SECRET_PREFIX + '__probe__' + Math.random().toString(36).slice(2);
-        ORIG.set(probe, { v: 'ok', t: Date.now() });      // نكتب بالأصل داخل الإغلاق
-        const listed = GM_listValues_f();                 // نقرأ بالقناع
+        ORIG.set(probe, { v: 'ok', t: Date.now() });
+        const listed = GM_listValues_f();
         const hidden = Array.isArray(listed) && !listed.includes(probe);
         const def = Symbol('def');
-        const masked = GM_getValue_f(probe, def) === def; // يجب أن يرجع الافتراضي
+        const masked = GM_getValue_f(probe, def) === def;
         ORIG.del(probe); idxDel(probe);
 
-        // (ب) تأكد أن GM.* يشير للنسخ المفلترة (حتى إن تعذّر استبدال GM_* العارية)
-        const gmObjOK =
-          typeof GM === 'object' && GM &&
-          GM.setValue === GM_setValue_f &&
-          GM.listValues === GM_listValues_f;
+        // تأكيد أن GM.* يشير للنسخ المفلترة
+        const gmObjOK = typeof GM === 'object' && GM &&
+                        GM.setValue === GM_setValue_f &&
+                        GM.listValues === GM_listValues_f;
 
-        // (ج) (وضع صارم اختياري) — هوية النسخ العارية إن كانت قابلة للاستبدال
-        const bareOK =
-          (typeof GM_setValue !== 'function') || (GM_setValue === GM_setValue_f);
+        // (صِرامة اختيارية) — هوية النسخ العارية إن كانت قابلة للاستبدال
+        const bareOK = (typeof GM_setValue !== 'function') || (GM_setValue === GM_setValue_f);
 
         const ok = hidden && masked && gmObjOK && (mode === 'soft' ? true : bareOK);
 
@@ -326,7 +310,6 @@
     }
   };
 
-  // ننشر الحراسة على globalThis و unsafeWindow (للتحقق المتبادل)
   defineRO(globalThis,    '__SCPF_GUARD_ACTIVE__', true);
   defineRO(globalThis,    '__SCPF_GUARD_VERSION__', GUARD_VERSION);
   defineRO(globalThis,    '__SCPF_GUARD_TOKEN__', TOKEN);
@@ -342,15 +325,14 @@
     }
   } catch(_) {}
 
-  // نفّذ التحقّق السلوكي مرة لضبط العلم العالمي فور الإقلاع
+  // نفّذ التحقق السلوكي مرة لضبط العلم العالمي فورًا
   try { GuardAPI.assert('soft'); } catch {}
 
-  // =========[ 12) لوج إثبات جاهزية الحارس (اختياري — احذفه في الإنتاج) ]=========
+  // لوق بسيط (احذفه في الإنتاج)
   try {
     console.log('%c[SCPF Guard]', 'color:#09f',
       'ready:', (globalThis.__SCPF_GUARD_ASSERT_OK__ === true),
-      'GM_* types:', { set:typeof GM_setValue, get:typeof GM_getValue, list:typeof GM_listValues },
       'version:', GUARD_VERSION);
   } catch(_) {}
 
-})(); // نهاية ملف الـ@require
+})();
