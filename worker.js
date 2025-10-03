@@ -278,36 +278,43 @@
     bridge: Object.freeze({ GM: GM_filtered, GM_info: ORIG.info || {}, unsafeWindow: (typeof unsafeWindow!=='undefined')?unsafeWindow:window }),
     vault: Vault,
     runNF: SCPF_runNF,
-    assert(mode = 'soft') {
-      try {
-        // اختبار سلوكي: مفتاح سري لا يظهر ولا يُقرأ عبر الواجهات المفلترة
-        const probe = SECRET_PREFIX + '__probe__' + Math.random().toString(36).slice(2);
-        ORIG.set(probe, { v: 'ok', t: Date.now() });
-        const listed = GM_listValues_f();
-        const hidden = Array.isArray(listed) && !listed.includes(probe);
-        const def = Symbol('def');
-        const masked = GM_getValue_f(probe, def) === def;
-        ORIG.del(probe); idxDel(probe);
+// بدّل جسم assert بالكامل بهذا
+assert(mode = 'soft') {
+  try {
+    // (أ) اختبار سلوكي: المفتاح السري لا يظهر ولا يُقرأ عبر النسخ المفلترة
+    const probe = SECRET_PREFIX + '__probe__' + Math.random().toString(36).slice(2);
+    ORIG.set(probe, { v: 'ok', t: Date.now() });
+    const listed = GM_listValues_f();
+    const hidden = Array.isArray(listed) && !listed.includes(probe);
+    const def = Symbol('def');
+    const masked = GM_getValue_f(probe, def) === def;
+    ORIG.del(probe); idxDel(probe);
 
-        // تأكيد أن GM.* يشير للنسخ المفلترة
-        const gmObjOK = typeof GM === 'object' && GM &&
-                        GM.setValue === GM_setValue_f &&
-                        GM.listValues === GM_listValues_f;
+    // (ب) نجاح بأيّ من مسارين:
+    //  1) إمّا استطعنا تعيين GM العالمي إلى النسخة المفلترة
+    const gmVisible =
+      typeof GM === 'object' && GM &&
+      GM.setValue === GM_setValue_f &&
+      GM.listValues === GM_listValues_f;
 
-        // (صِرامة اختيارية) — هوية النسخ العارية إن كانت قابلة للاستبدال
-        const bareOK = (typeof GM_setValue !== 'function') || (GM_setValue === GM_setValue_f);
+    //  2) أو (إذا كان GM العالمي غير قابل للتغيير) على الأقل الجسر يعمل
+    const gmBridgeOK =
+      !!this.bridge && this.bridge.GM &&
+      this.bridge.GM.setValue === GM_setValue_f &&
+      this.bridge.GM.listValues === GM_listValues_f;
 
-        const ok = hidden && masked && gmObjOK && (mode === 'soft' ? true : bareOK);
+    // (ج) شرط النجاح النهائي
+    const ok = hidden && masked && (gmVisible || gmBridgeOK);
 
-        if (ok) {
-          try { defineRO(globalThis, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
-          try { if (typeof unsafeWindow !== 'undefined') defineRO(unsafeWindow, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
-        }
-        return ok;
-      } catch {
-        return false;
-      }
+    if (ok) {
+      try { defineRO(globalThis, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
+      try { if (typeof unsafeWindow !== 'undefined') defineRO(unsafeWindow, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
     }
+    return ok;
+  } catch {
+    return false;
+  }
+}
   };
 
   defineRO(globalThis,    '__SCPF_GUARD_ACTIVE__', true);
