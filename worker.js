@@ -8,38 +8,46 @@
   'use strict';
 
   // =========[ 0) إعدادات عامّة ]=========
-  const GUARD_VERSION = 'SCPF-Guard/1.4';
-  const SECRET_PREFIX = 'scpf:secret:';              // نطاق سري داخلي
-  const INDEX_KEY     = SECRET_PREFIX + '__index__'; // فهرس مفاتيح النطاق السري
+  const GUARD_VERSION = 'SCPF-Guard/1.5';
 
-  // اللبّ الأساسي الواجب توافره فعلاً ليعمل الحارس
-  const REQUIRED_CORE = [
-    'GM_setValue','GM_getValue','GM_deleteValue','GM_listValues',
-    // واحد على الأقل من قناتي XHR (الجديدة أو القديمة)
-    'GM_xmlhttpRequest'
-  ];
+  // نطاقات المفاتيح
+  const SECRET_PREFIX = 'scpf:secret:';             // نطاق داخلي خاص بالحارس
+  const PUBLIC_PREFIX = 'scpf:';                    // نطاق سكربتك العام
+  const HOT_PTR_KEY   = '__SCPF_GM_HOT_PTR__';      // مؤشر حزمة NF الحارة (Stage-0)
+  const INDEX_KEY     = SECRET_PREFIX + '__index__';
+
+  // ما نعتبره "مسموحًا عالميًا" لتفادي كسر Stage-0 والحقن من الكاش:
+  const isAllowedKey = (k) => {
+    const s = String(k || '');
+    return s === HOT_PTR_KEY || s.startsWith(PUBLIC_PREFIX);
+  };
+  const isSecretKey = (k) => String(k || '').startsWith(SECRET_PREFIX);
 
   // =========[ 1) أدوات صغيرة ]=========
   const defineRO = (obj, key, val) => {
     try { Object.defineProperty(obj, key, { value: val, configurable: false, enumerable: false, writable: false }); }
     catch(_) { try { obj[key] = val; } catch(__) {} }
   };
-  const awaitify = (x) => (x && typeof x.then === 'function') ? x : Promise.resolve(x);
-  const isSecret = (k) => String(k||'').startsWith(SECRET_PREFIX);
   const noConsole = { log(){}, warn(){}, error(){}, info(){}, debug(){} };
 
-  // =========[ 2) التقاط النسخ الأصلية داخل الإغلاق ]=========
+  // =========[ 2) التقاط النسخ الأصلية (لا نعرضها عالميًا) ]=========
   const ORIG = Object.freeze({
     GM: (typeof GM !== 'undefined' && GM) ? GM : null,
+
+    // تخزين (TM يُبقيها متزامنة)
     set  : (typeof GM_setValue    === 'function') ? GM_setValue    : null,
     get  : (typeof GM_getValue    === 'function') ? GM_getValue    : null,
     del  : (typeof GM_deleteValue === 'function') ? GM_deleteValue : null,
     list : (typeof GM_listValues  === 'function') ? GM_listValues  : null,
+
     add  : (typeof GM_addValueChangeListener      === 'function') ? GM_addValueChangeListener : null,
     rem  : (typeof GM_removeValueChangeListener   === 'function') ? GM_removeValueChangeListener : null,
-    // XHR: إمّا GM.xmlHttpRequest (TM الحديث) أو GM_xmlhttpRequest
+
+    // XHR (قناة واحدة كافية)
     xreq : (typeof (GM && GM.xmlHttpRequest) === 'function') ? GM.xmlHttpRequest
           : (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest : null,
+
+    // بقيّة الخدمات
     addStyle   : (typeof GM_addStyle   === 'function') ? GM_addStyle   : null,
     addElement : (typeof GM_addElement === 'function') ? GM_addElement : null,
     log        : (typeof GM_log        === 'function') ? GM_log        : null,
@@ -51,29 +59,27 @@
     unreg      : (typeof GM_unregisterMenuCommand === 'function') ? GM_unregisterMenuCommand : null,
     getResText : (typeof GM_getResourceText === 'function') ? GM_getResourceText : null,
     getResURL  : (typeof GM_getResourceURL  === 'function') ? GM_getResourceURL  : null,
-    // تبويب: قد يكون على الشكل القديم فقط (callbacks)
+
+    // تبويب (قد تكون callbacks فقط)
     getTab_cb  : (typeof GM_getTab  === 'function') ? GM_getTab  : null,
     saveTab_cb : (typeof GM_saveTab === 'function') ? GM_saveTab : null,
     getTabs_cb : (typeof GM_getTabs === 'function') ? GM_getTabs : null,
+
     info       : (typeof GM_info !== 'undefined') ? GM_info : {},
   });
 
-  // =========[ 3) إنفاذ اللبّ الأساسي ]=========
-  (function enforceCore() {
+  // تأكّد من لبّ GM الأساسي (بدون طباعة)
+  (() => {
     const missing = [];
     if (!ORIG.set)  missing.push('GM_setValue');
     if (!ORIG.get)  missing.push('GM_getValue');
     if (!ORIG.del)  missing.push('GM_deleteValue');
     if (!ORIG.list) missing.push('GM_listValues');
     if (!ORIG.xreq) missing.push('GM_xmlhttpRequest');
-
-    if (missing.length) {
-      // لا نطبع في الكونسول — لكن نمنع الحارس كي لا يورّث بيئة مضروبة
-      throw new Error('[SCPF Guard] Core GM API missing: ' + missing.join(', '));
-    }
+    if (missing.length) throw new Error('[SCPF Guard] Core GM API missing: ' + missing.join(', '));
   })();
 
-  // =========[ 4) فهرس النطاق السرّي + أدوات تخزين داخليّة ]=========
+  // =========[ 3) فهرس داخلي لنطاق السرّ ]=========
   function idxGet() {
     let arr = ORIG.get(INDEX_KEY, []);
     if (!Array.isArray(arr)) arr = [];
@@ -89,61 +95,86 @@
     if (i >= 0) { arr.splice(i,1); ORIG.set(INDEX_KEY, arr); }
   }
 
-  // =========[ 5) طبقة GM مفلترة + توحيد السلوك ]=========
-  // التخزين: دائمًا Promise
-  function GM_setValue_f(key, value) {
-    if (isSecret(key)) return Promise.reject(new Error('[SCPF Guard] write to secret namespace is forbidden'));
-    return awaitify(ORIG.set(key, value));
+  // =========[ 4) حجب GM_* العالمية مع "مسار أبيض" لمفاتيح السكربت ]=========
+  // IMPORTANT: نحافظ على "التزامن" في هذه النسخ لعدم كسر Stage-0.
+  function GM_setValue_guarded(key, value) {
+    if (isSecretKey(key)) return;                 // ممنوع
+    if (!isAllowedKey(key)) return;               // تجاهُل لأي مفتاح خارج scpf:/HOT_PTR
+    return ORIG.set(key, value);
   }
-  function GM_getValue_f(key, def) {
-    if (isSecret(key)) return Promise.resolve(def);
-    return awaitify(ORIG.get(key, def));
+  function GM_getValue_guarded(key, def) {
+    if (isSecretKey(key)) return def;             // مخفي
+    if (!isAllowedKey(key)) return def;           // مخفي
+    return ORIG.get(key, def);
   }
-  function GM_deleteValue_f(key) {
-    if (isSecret(key)) return Promise.resolve();
-    return awaitify(ORIG.del(key));
+  function GM_deleteValue_guarded(key) {
+    if (isSecretKey(key)) return;                 // تجاهُل
+    if (!isAllowedKey(key)) return;               // تجاهُل
+    return ORIG.del(key);
   }
-  function GM_listValues_f() {
+  function GM_listValues_guarded() {
     const ks = ORIG.list();
-    const arr = (Array.isArray(ks) ? ks : []);
-    return Promise.resolve(arr.filter(k => !isSecret(k)));
+    const arr = Array.isArray(ks) ? ks : [];
+    // لا نُظهر إلا مفاتيح السكربت (+ المؤشر)
+    return arr.filter(k => isAllowedKey(k));
   }
-
-  // مستمعو التغيّر — نُخفي مفاتيح السر
   const listenerMap = new Map();
-  function GM_addValueChangeListener_f(key, cb) {
+  function GM_addValueChangeListener_guarded(key, cb) {
     if (!ORIG.add) return undefined;
-    if (isSecret(key)) {
-      const id = Math.random().toString(36).slice(2);
-      listenerMap.set(id, null);
-      return id;
+    if (!isAllowedKey(key) || isSecretKey(key)) {
+      const fakeId = Math.random().toString(36).slice(2);
+      listenerMap.set(fakeId, null);
+      return fakeId;
     }
     const wrapped = (name, oldValue, newValue, remote) => {
-      try { if (!isSecret(name)) cb(name, oldValue, newValue, remote); } catch(_) {}
+      try {
+        if (isAllowedKey(name) && !isSecretKey(name)) cb(name, oldValue, newValue, remote);
+      } catch(_) {}
     };
     const id = ORIG.add(key, wrapped);
     listenerMap.set(id, wrapped);
     return id;
   }
-  function GM_removeValueChangeListener_f(id) {
+  function GM_removeValueChangeListener_guarded(id) {
     if (!ORIG.rem) return;
     const wrapped = listenerMap.get(id);
     listenerMap.delete(id);
     if (wrapped) ORIG.rem(id);
   }
 
-  // تبويب: دائمًا Promise حتى لو المصدر callback فقط
+  // نثبت النسخ المحروسة على globalThis (ستُرى من أي كود لاحق)
+  try {
+    /* eslint-disable no-global-assign */
+    GM_setValue    = GM_setValue_guarded;
+    GM_getValue    = GM_getValue_guarded;
+    GM_deleteValue = GM_deleteValue_guarded;
+    GM_listValues  = GM_listValues_guarded;
+    if (ORIG.add) GM_addValueChangeListener    = GM_addValueChangeListener_guarded;
+    if (ORIG.rem) GM_removeValueChangeListener = GM_removeValueChangeListener_guarded;
+    /* eslint-enable no-global-assign */
+  } catch {
+    const defs = {
+      GM_setValue   : { value: GM_setValue_guarded, configurable: true },
+      GM_getValue   : { value: GM_getValue_guarded, configurable: true },
+      GM_deleteValue: { value: GM_deleteValue_guarded, configurable: true },
+      GM_listValues : { value: GM_listValues_guarded, configurable: true },
+    };
+    if (ORIG.add) defs.GM_addValueChangeListener    = { value: GM_addValueChangeListener_guarded, configurable: true };
+    if (ORIG.rem) defs.GM_removeValueChangeListener = { value: GM_removeValueChangeListener_guarded, configurable: true };
+    Object.defineProperties(globalThis, defs);
+  }
+
+  // =========[ 5) جسر GM (Promises) للوحدات والرئيسي ]=========
+  // تبويب (Promises دائمًا)
   function makeTabsAPI() {
-    // لو توفّرت واجهة Promise حديثة داخل GM، استخدمها كما هي:
     if (ORIG.GM && typeof ORIG.GM.getTab === 'function' &&
         typeof ORIG.GM.saveTab === 'function' && typeof ORIG.GM.getTabs === 'function') {
       return {
-        getTab:    () => ORIG.GM.getTab(),
-        saveTab:   (obj) => ORIG.GM.saveTab(obj),
-        getTabs:   () => ORIG.GM.getTabs()
+        getTab  : () => ORIG.GM.getTab(),
+        saveTab : (obj) => ORIG.GM.saveTab(obj),
+        getTabs : () => ORIG.GM.getTabs()
       };
     }
-    // خلاف ذلك: لفّ الواجهة القديمة callback → Promise
     const getTab = () => new Promise(resolve => {
       try { ORIG.getTab_cb ? ORIG.getTab_cb(resolve) : resolve({id:'0'}); }
       catch(_) { resolve({id:'0'}); }
@@ -160,63 +191,60 @@
   }
   const TabsAPI = makeTabsAPI();
 
-  // تمهيد XHR: مرّر كما هو بدون تغيير في نوع الإرجاع
-  const XHR_f = ORIG.xreq ? (...a)=>ORIG.xreq.apply(null, a) : undefined;
+  // XHR كما هي
+  const XHR_p = ORIG.xreq ? (...a)=>ORIG.xreq.apply(null, a) : undefined;
 
-  // تجميعة GM المفلترة (شكل ثابت)
-  const GM_filtered = (() => {
+  // نسخة Promise-based نظيفة
+  const GM_bridge = (() => {
+    const prom = (fn) => (...a) => {
+      try {
+        const r = fn(...a);
+        return (r && typeof r.then === 'function') ? r : Promise.resolve(r);
+      } catch (e) { return Promise.reject(e); }
+    };
     const obj = {
-      // تخزين (Promises)
-      setValue   : GM_setValue_f,
-      getValue   : GM_getValue_f,
-      deleteValue: GM_deleteValue_f,
-      listValues : GM_listValues_f,
+      setValue   : prom((k,v)=> ORIG.set(k,v)),
+      getValue   : prom((k,d)=> ORIG.get(k,d)),
+      deleteValue: prom((k)=> ORIG.del(k)),
+      listValues : prom(()=> ORIG.list()),
       setValues  : async (objOrEntries) => {
         if (!objOrEntries) return;
         const entries = Array.isArray(objOrEntries) ? objOrEntries : Object.entries(objOrEntries);
-        for (const [k, v] of entries) {
-          if (isSecret(k)) throw new Error('[SCPF Guard] write to secret namespace is forbidden');
-          await GM_setValue_f(k, v);
-        }
+        for (const [k, v] of entries) await ORIG.set(k, v);
       },
       getValues  : async (keysOrDefaults) => {
         const out = {};
         if (Array.isArray(keysOrDefaults)) {
-          for (const k of keysOrDefaults) out[k] = isSecret(k) ? undefined : await GM_getValue_f(k);
+          for (const k of keysOrDefaults) out[k] = await ORIG.get(k);
         } else if (keysOrDefaults && typeof keysOrDefaults === 'object') {
-          for (const [k, def] of Object.entries(keysOrDefaults)) out[k] = isSecret(k) ? def : await GM_getValue_f(k, def);
+          for (const [k, d] of Object.entries(keysOrDefaults)) out[k] = await ORIG.get(k, d);
         }
         return out;
       },
-      deleteValues: async (keys) => {
-        for (const k of (keys || [])) if (!isSecret(k)) await GM_deleteValue_f(k);
-      },
-      addValueChangeListener    : ORIG.add ? GM_addValueChangeListener_f    : undefined,
-      removeValueChangeListener : ORIG.rem ? GM_removeValueChangeListener_f : undefined,
+      deleteValues: async (keys) => { for (const k of (keys||[])) await ORIG.del(k); },
+      addValueChangeListener    : ORIG.add ? (k,cb)=>ORIG.add(k,cb) : undefined,
+      removeValueChangeListener : ORIG.rem ? (id)=>ORIG.rem(id)    : undefined,
 
-      // تبويب (Promises دائمًا)
+      // تبويب
       getTab  : TabsAPI.getTab,
       saveTab : TabsAPI.saveTab,
       getTabs : TabsAPI.getTabs,
 
-      // بقية الدوال كما هي
+      // بقية الخدمات
       addStyle       : ORIG.addStyle   || (()=>{}),
       addElement     : ORIG.addElement || (()=>{}),
       log            : ORIG.log        || noConsole.log,
       notification   : ORIG.note       || (()=>{}),
       openInTab      : ORIG.open       || (()=>{}),
-      download       : ORIG.dl         || (() => {}),
+      download       : ORIG.dl         || (()=>{}),
       setClipboard   : ORIG.setClip    || (()=>{}),
       getResourceText: ORIG.getResText || (()=>undefined),
       getResourceURL : ORIG.getResURL  || (()=>undefined),
-      xmlHttpRequest : XHR_f,
+      xmlHttpRequest : XHR_p,
       info           : ORIG.info || {}
     };
     return Object.freeze(obj);
   })();
-
-  // نشر GM المفلتر على globalThis ليقرأه الرئيسي إن احتاج
-  try { Object.defineProperty(globalThis, 'GM', { value: GM_filtered, configurable: true }); } catch(_) {}
 
   // =========[ 6) إخفاء واجهات GM عن الصفحة (unsafeWindow) ]=========
   (function hardenPageAgainstGMLeak() {
@@ -236,7 +264,7 @@
     } catch(_) {}
   })();
 
-  // =========[ 7) Vault داخلي (اختياري) ]=========
+  // =========[ 7) Vault داخلي عبر SECRET_PREFIX ]=========
   const Vault = Object.freeze({
     set(key, value) { const raw = SECRET_PREFIX + key; ORIG.set(raw, { v: value, t: Date.now() }); idxAdd(raw); },
     get(key, def=null) { const p = ORIG.get(SECRET_PREFIX + key, null); return p && 'v' in p ? p.v : def; },
@@ -244,52 +272,49 @@
     list() { return (ORIG.list() || []).filter(k => k.startsWith(SECRET_PREFIX)); }
   });
 
-  // =========[ 8) runNF — متوافق مع الرئيسي ]=========
+  // =========[ 8) runNF (للوحدات المحقونة) ]=========
   function SCPF_runNF(codeString) {
     const fn = new Function('GM','GM_info','unsafeWindow', `"use strict"; return (async()=>{ ${codeString} })();`);
     const w  = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-    return fn(GM_filtered, ORIG.info || {}, w);
+    return fn(GM_bridge, ORIG.info || {}, w);
   }
 
   // =========[ 9) assert سلوكي + نشر العلامات ]=========
   const GuardAPI = {
     version: GUARD_VERSION,
-    bridge: Object.freeze({ GM: GM_filtered, GM_info: ORIG.info || {}, unsafeWindow: (typeof unsafeWindow!=='undefined')?unsafeWindow:window }),
+    bridge: Object.freeze({ GM: GM_bridge, GM_info: ORIG.info || {}, unsafeWindow: (typeof unsafeWindow!=='undefined')?unsafeWindow:window }),
     vault: Vault,
     runNF: SCPF_runNF,
-    assert(mode = 'soft') {
+    // نجاح = المفاتيح السرية لا تظهر، و GM العالمي محروس (يعرض فقط scpf:/HOT_PTR)
+    async assert() {
       try {
-        // (أ) اختبار سلوكي: المفتاح السري لا يظهر ولا يُقرأ عبر النسخ المفلترة
         const probe = SECRET_PREFIX + '__probe__' + Math.random().toString(36).slice(2);
         ORIG.set(probe, { v: 'ok', t: Date.now() });
-        return Promise.resolve().then(() => GM_listValues_f())
-          .then(listed => {
-            const hidden = Array.isArray(listed) && !listed.includes(probe);
-            const def = Symbol('def');
-            return GM_getValue_f(probe, def).then(v => {
-              const masked = (v === def);
-              ORIG.del(probe); idxDel(probe);
-              const gmVisible =
-                typeof GM === 'object' && GM &&
-                GM.setValue === GM_setValue_f &&
-                GM.listValues === GM_listValues_f;
-              const gmBridgeOK =
-                !!this.bridge && this.bridge.GM &&
-                this.bridge.GM.setValue === GM_setValue_f &&
-                this.bridge.GM.listValues === GM_listValues_f;
-              const ok = hidden && masked && (gmVisible || gmBridgeOK);
-              if (ok) {
-                try { defineRO(globalThis, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
-                try {
-                  const w = (typeof unsafeWindow!=='undefined')?unsafeWindow:null;
-                  if (w) defineRO(w,'__SCPF_GUARD_ASSERT_OK__',true);
-                } catch(_){}
-              }
-              return ok;
-            });
-          });
+
+        const listed = GM_listValues_guarded();
+        const hidden = Array.isArray(listed) && !listed.includes(probe);
+
+        const def = Symbol('def');
+        const masked = GM_getValue_guarded(probe, def) === def;
+
+        ORIG.del(probe); idxDel(probe);
+
+        const gmGuarded =
+          typeof GM_setValue === 'function' &&
+          typeof GM_getValue === 'function' &&
+          typeof GM_listValues === 'function';
+
+        const ok = hidden && masked && gmGuarded;
+        if (ok) {
+          try { defineRO(globalThis, '__SCPF_GUARD_ASSERT_OK__', true); } catch(_){}
+          try {
+            const w = (typeof unsafeWindow!=='undefined')?unsafeWindow:null;
+            if (w) defineRO(w,'__SCPF_GUARD_ASSERT_OK__',true);
+          } catch(_){}
+        }
+        return ok;
       } catch {
-        return Promise.resolve(false);
+        return false;
       }
     }
   };
@@ -297,7 +322,6 @@
   defineRO(globalThis, '__SCPF_GUARD_ACTIVE__', true);
   defineRO(globalThis, '__SCPF_GUARD_VERSION__', GUARD_VERSION);
   defineRO(globalThis, '__SCPF_GUARD__', Object.freeze(GuardAPI));
-
   try {
     const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : null;
     if (w) {
@@ -307,10 +331,11 @@
     }
   } catch(_) {}
 
-  // شغّل assert مرة لضبط العلم (بدون كونسول)
-  try { GuardAPI.assert('soft'); } catch {}
+  // نفّذ assert مرة لضبط العلم (صامت)
+  try { GuardAPI.assert(); } catch {}
 
 })();
+
 
 (() => {
   'use strict';
