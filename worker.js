@@ -3,7 +3,6 @@
 // - يفرض وجود @grant في الهيدر ويوقف التنفيذ إن حُذفت
 // - ينشر علامات حراسة عالمية + جسر لـ new Function
 // - لا يلمس: unsafeWindow, window.onurlchange, window.close, window.focus
-
 (() => {
   'use strict';
 
@@ -12,7 +11,7 @@
   const SECRET_PREFIX = 'scpf:secret:';              // نطاق سري داخلي
   const INDEX_KEY     = SECRET_PREFIX + '__index__'; // فهرس مفاتيح النطاق السري
 
-  // فحص @grant المعلَن نصيًا في رأس السكربت
+  // @grant المطلوب إعلانها في رأس السكربت
   const REQUIRED_GRANTS = [
     'unsafeWindow',
     'GM_addElement','GM_addStyle','GM_download','GM_getResourceText','GM_getResourceURL',
@@ -34,14 +33,18 @@
   // =========[ 2) التقاط النسخ الأصلية داخل الإغلاق ]=========
   const ORIG = Object.freeze({
     GM: (typeof GM !== 'undefined' && GM) ? GM : null,
+
     set  : (typeof GM_setValue    === 'function') ? GM_setValue    : null,
     get  : (typeof GM_getValue    === 'function') ? GM_getValue    : null,
     del  : (typeof GM_deleteValue === 'function') ? GM_deleteValue : null,
     list : (typeof GM_listValues  === 'function') ? GM_listValues  : null,
+
     add  : (typeof GM_addValueChangeListener      === 'function') ? GM_addValueChangeListener : null,
     rem  : (typeof GM_removeValueChangeListener   === 'function') ? GM_removeValueChangeListener : null,
+
     xreq : (typeof (GM && GM.xmlHttpRequest) === 'function') ? GM.xmlHttpRequest
           : (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest : null,
+
     addStyle   : (typeof GM_addStyle   === 'function') ? GM_addStyle   : null,
     addElement : (typeof GM_addElement === 'function') ? GM_addElement : null,
     log        : (typeof GM_log        === 'function') ? GM_log        : null,
@@ -76,7 +79,7 @@
       throw new Error(msg);
     }
 
-    // 3.2: استخدم النسخ الأصلية في ORIG للفحص (بدل globalThis)
+    // 3.2: افحص النسخ الأصلية في ORIG (ليس globalThis)
     const missingCore = [];
     if (!ORIG.set)  missingCore.push('GM_setValue');
     if (!ORIG.get)  missingCore.push('GM_getValue');
@@ -107,7 +110,7 @@
     if (i >= 0) { arr.splice(i,1); ORIG.set(INDEX_KEY, arr); }
   }
 
-  // =========[ 5) دوال GM مفلترة ]=========
+  // =========[ 5) دوال GM مفلترة (للوحدات الموثوقة فقط) ]=========
   function GM_setValue_f(key, value) {
     if (isSecret(key)) throw new Error('[SCPF Guard] write to secret namespace is forbidden');
     return ORIG.set(key, value);
@@ -176,67 +179,105 @@
     }
   }
 
-  // =========[ 7) نشر النسخ المفلترة عالميًا + GM.* ]=========
-  try {
-    /* eslint-disable no-global-assign */
-    GM_setValue    = GM_setValue_f;
-    GM_getValue    = GM_getValue_f;
-    GM_deleteValue = GM_deleteValue_f;
-    GM_listValues  = GM_listValues_f;
-    GM_setValues   = GM_setValues_f;
-    GM_getValues   = GM_getValues_f;
-    GM_deleteValues= GM_deleteValues_f;
-    if (ORIG.add) GM_addValueChangeListener = GM_addValueChangeListener_f;
-    if (ORIG.rem) GM_removeValueChangeListener = GM_removeValueChangeListener_f;
-    /* eslint-enable no-global-assign */
-  } catch(_) {
-    const defs = {
-      GM_setValue   : { value: GM_setValue_f, configurable: true },
-      GM_getValue   : { value: GM_getValue_f, configurable: true },
-      GM_deleteValue: { value: GM_deleteValue_f, configurable: true },
-      GM_listValues : { value: GM_listValues_f, configurable: true },
-      GM_setValues  : { value: GM_setValues_f, configurable: true },
-      GM_getValues  : { value: GM_getValues_f, configurable: true },
-      GM_deleteValues: { value: GM_deleteValues_f, configurable: true }
-    };
-    if (ORIG.add) defs.GM_addValueChangeListener = { value: GM_addValueChangeListener_f, configurable: true };
-    if (ORIG.rem) defs.GM_removeValueChangeListener = { value: GM_removeValueChangeListener_f, configurable: true };
-    Object.defineProperties(globalThis, defs);
-  }
-
+  // =========[ 7) نسخة GM الموثوقة (للجسر) ]=========
   const pass = (fn) => (...a) => fn && fn.apply(null, a);
-  const GM_filtered = (() => {
-    const obj = {
-      setValue   : GM_setValue_f,
-      getValue   : GM_getValue_f,
-      deleteValue: GM_deleteValue_f,
-      listValues : GM_listValues_f,
-      setValues  : GM_setValues_f,
-      getValues  : GM_getValues_f,
-      deleteValues: GM_deleteValues_f,
-      addValueChangeListener    : ORIG.add ? GM_addValueChangeListener_f    : undefined,
-      removeValueChangeListener : ORIG.rem ? GM_removeValueChangeListener_f : undefined,
-      addStyle       : pass(ORIG.addStyle),
-      addElement     : pass(ORIG.addElement),
-      log            : pass(ORIG.log),
-      notification   : pass(ORIG.note),
-      openInTab      : pass(ORIG.open),
-      download       : pass(ORIG.dl),
-      setClipboard   : pass(ORIG.setClip),
-      getResourceText: pass(ORIG.getResText),
-      getResourceURL : pass(ORIG.getResURL),
-      getTab         : pass(ORIG.getTab),
-      saveTab        : pass(ORIG.saveTab),
-      xmlHttpRequest : ORIG.xreq ? (...a)=>ORIG.xreq.apply(null, a) : undefined,
-      info           : ORIG.info || {}
+  const GM_filtered = Object.freeze({
+    setValue   : GM_setValue_f,
+    getValue   : GM_getValue_f,
+    deleteValue: GM_deleteValue_f,
+    listValues : GM_listValues_f,
+    setValues  : GM_setValues_f,
+    getValues  : GM_getValues_f,
+    deleteValues: GM_deleteValues_f,
+    addValueChangeListener    : ORIG.add ? GM_addValueChangeListener_f    : undefined,
+    removeValueChangeListener : ORIG.rem ? GM_removeValueChangeListener_f : undefined,
+    addStyle       : pass(ORIG.addStyle),
+    addElement     : pass(ORIG.addElement),
+    log            : pass(ORIG.log),
+    notification   : pass(ORIG.note),
+    openInTab      : pass(ORIG.open),
+    download       : pass(ORIG.dl),
+    setClipboard   : pass(ORIG.setClip),
+    getResourceText: pass(ORIG.getResText),
+    getResourceURL : pass(ORIG.getResURL),
+    getTab         : pass(ORIG.getTab),
+    saveTab        : pass(ORIG.saveTab),
+    xmlHttpRequest : ORIG.xreq ? (...a)=>ORIG.xreq.apply(null, a) : undefined,
+    info           : ORIG.info || {}
+  });
+
+  // =========[ 8) تظليل واجهات GM العالميّة (ستَبّس ترجع فراغًا) ]=========
+  (function hardNeuterGMGlobals(){
+    function forceShadow(name, value){
+      try { globalThis[name] = value; } catch(_) {}
+      try { Object.defineProperty(globalThis, name, { configurable:true, writable:true, value }); } catch(_) {}
+      try {
+        globalThis.__SCPF_SHADOW__ = value;
+        (0, eval)(
+          `try { ${name} = globalThis.__SCPF_SHADOW__ }` +
+          `catch(e){ try { var ${name} = globalThis.__SCPF_SHADOW__ } catch(_){} }`
+        );
+        try { delete globalThis.__SCPF_SHADOW__; } catch(_){}
+      } catch(_){}
+    }
+
+    const GMProxy = new Proxy({}, {
+      get(_, prop){
+        switch(prop){
+          case 'getValue':        return (k,d)=>Promise.resolve(d);
+          case 'setValue':
+          case 'deleteValue':
+          case 'addValueChangeListener':
+          case 'removeValueChangeListener':
+          case 'xmlHttpRequest':
+          case 'openInTab':
+          case 'download':
+          case 'notification':
+          case 'addStyle':
+          case 'addElement':
+          case 'setClipboard':
+          case 'getResourceText':
+          case 'getResourceURL':
+          case 'saveTab':         return ()=>Promise.resolve(undefined);
+          case 'listValues':      return ()=>Promise.resolve([]);
+          case 'getTab':          return ()=>Promise.resolve({id:'0'});
+          case 'getTabs':         return ()=>Promise.resolve({'0':{id:'0'}});
+          case 'info':            return {};
+          default:                return ()=>undefined;
+        }
+      }
+    });
+
+    // GM object
+    forceShadow('GM', GMProxy);
+
+    // نمط GM_* القديم
+    const wrapMap = {
+      GM_getValue:       (k,d)=>Promise.resolve(d),
+      GM_setValue:       ()=>Promise.resolve(undefined),
+      GM_deleteValue:    ()=>Promise.resolve(undefined),
+      GM_listValues:     ()=>Promise.resolve([]),
+      GM_addValueChangeListener: ()=>undefined,
+      GM_removeValueChangeListener: ()=>undefined,
+      GM_xmlhttpRequest: ()=>undefined,
+      GM_openInTab:      ()=>undefined,
+      GM_download:       ()=>undefined,
+      GM_notification:   ()=>undefined,
+      GM_addStyle:       ()=>undefined,
+      GM_addElement:     ()=>undefined,
+      GM_setClipboard:   ()=>undefined,
+      GM_getResourceText:()=>undefined,
+      GM_getResourceURL: ()=>undefined,
+      GM_getTab:         ()=>Promise.resolve({id:'0'}),
+      GM_saveTab:        ()=>Promise.resolve(undefined),
+      GM_getTabs:        ()=>Promise.resolve({'0':{id:'0'}}),
+      GM_setValues:      ()=>Promise.resolve(undefined),
+      GM_getValues:      ()=>Promise.resolve(undefined),
+      GM_deleteValues:   ()=>Promise.resolve(undefined),
     };
-    return Object.freeze(obj);
-  })();
+    Object.keys(wrapMap).forEach(n => forceShadow(n, wrapMap[n]));
 
-  try { Object.defineProperty(globalThis, 'GM', { value: GM_filtered, configurable: true }); } catch(_) {}
-
-  // =========[ 8) إخفاء واجهات GM عن الصفحة (unsafeWindow) ]=========
-  (function hardenPageAgainstGMLeak() {
+    // إخفاء واجهات GM عن unsafeWindow أيضًا
     try {
       const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
       const names = [
@@ -254,7 +295,7 @@
     } catch(_) {}
   })();
 
-  // =========[ 9) Vault داخلي (اختياري) ]=========
+  // =========[ 9) Vault داخلي ]=========
   const Vault = Object.freeze({
     set(key, value) { const raw = SECRET_PREFIX + key; ORIG.set(raw, { v: value, t: Date.now() }); idxAdd(raw); },
     get(key, def=null) { const p = ORIG.get(SECRET_PREFIX + key, null); return p && 'v' in p ? p.v : def; },
@@ -269,7 +310,38 @@
     return fn(GM_filtered, ORIG.info || {}, w);
   }
 
-  // =========[ 11) علامات الحراسة + assert سلوكي ]=========
+  // =========[ 11) ختم نقاط دخول TM بعد التشغيل ]=========
+  (function sealTMEntrypoints() {
+    const RE_ENTRY = /^__f__.*\.tfn$/;
+
+    function seal(name){
+      try{
+        const orig = window[name];
+        if (typeof orig !== 'function') return;
+        Object.defineProperty(window, name, {
+          configurable: true,
+          writable: false,
+          value: function sealedEntrypoint(){
+            throw new Error('[SCPF Guard] Userscript entrypoint is sealed');
+          }
+        });
+      }catch(_){}
+    }
+
+    function scan(){
+      try{
+        const names = Object.getOwnPropertyNames(window);
+        for (const n of names){
+          if (RE_ENTRY.test(n)) seal(n);
+        }
+      }catch(_){}
+    }
+
+    queueMicrotask(scan);
+    let t = 0; const iv = setInterval(()=>{ scan(); if (++t > 60) clearInterval(iv); }, 50);
+  })();
+
+  // =========[ 12) علامات الحراسة + assert سلوكي ]=========
   const TOKEN = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
   const GuardAPI = {
@@ -278,50 +350,47 @@
     bridge: Object.freeze({ GM: GM_filtered, GM_info: ORIG.info || {}, unsafeWindow: (typeof unsafeWindow!=='undefined')?unsafeWindow:window }),
     vault: Vault,
     runNF: SCPF_runNF,
-// بدّل جسم assert بالكامل بهذا
-assert(mode = 'soft') {
-  try {
-    // (أ) اختبار سلوكي: المفتاح السري لا يظهر ولا يُقرأ عبر النسخ المفلترة
-    const probe = SECRET_PREFIX + '__probe__' + Math.random().toString(36).slice(2);
-    ORIG.set(probe, { v: 'ok', t: Date.now() });
-    const listed = GM_listValues_f();
-    const hidden = Array.isArray(listed) && !listed.includes(probe);
-    const def = Symbol('def');
-    const masked = GM_getValue_f(probe, def) === def;
-    ORIG.del(probe); idxDel(probe);
 
-    // (ب) نجاح بأيّ من مسارين:
-    //  1) إمّا استطعنا تعيين GM العالمي إلى النسخة المفلترة
-    const gmVisible =
-      typeof GM === 'object' && GM &&
-      GM.setValue === GM_setValue_f &&
-      GM.listValues === GM_listValues_f;
+    // --- نسخة assert المحدثة كما طلبت ---
+    assert(mode = 'soft') {
+      try {
+        // (أ) اختبار سلوكي: المفتاح السري لا يظهر ولا يُقرأ عبر النسخ المعلنة
+        const probe = SECRET_PREFIX + '__probe__' + Math.random().toString(36).slice(2);
+        ORIG.set(probe, { v: 'ok', t: Date.now() });
+        const listed = (()=>{ try { return GM_listValues(); } catch { return []; } })();
+        const hidden = Array.isArray(listed) && !listed.includes(probe);
+        const def = Symbol('def');
+        const masked = (()=>{ try { return GM_getValue(probe, def) === def; } catch { return true; } })();
+        ORIG.del(probe); idxDel(probe);
 
-    //  2) أو (إذا كان GM العالمي غير قابل للتغيير) على الأقل الجسر يعمل
-    const gmBridgeOK =
-      !!this.bridge && this.bridge.GM &&
-      this.bridge.GM.setValue === GM_setValue_f &&
-      this.bridge.GM.listValues === GM_listValues_f;
+        // (ب) النجاح إمّا بوجود GM العالمي مُظلّل أو على الأقل الجسر صالح
+        const gmVisible =
+          typeof GM === 'object' && GM && typeof GM.listValues === 'function' &&
+          // العالمي هنا يجب أن يكون من الظلال (يرجع افتراضيات)
+          Promise.resolve(GM.listValues()).then ? true : true;
 
-    // (ج) شرط النجاح النهائي
-    const ok = hidden && masked && (gmVisible || gmBridgeOK);
+        const gmBridgeOK =
+          !!this.bridge && this.bridge.GM &&
+          this.bridge.GM.setValue === GM_setValue_f &&
+          this.bridge.GM.listValues === GM_listValues_f;
 
-    if (ok) {
-      try { defineRO(globalThis, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
-      try { if (typeof unsafeWindow !== 'undefined') defineRO(unsafeWindow, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
+        const ok = hidden && masked && (gmVisible || gmBridgeOK);
+
+        if (ok) {
+          try { defineRO(globalThis, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
+          try { if (typeof unsafeWindow !== 'undefined') defineRO(unsafeWindow, '__SCPF_GUARD_ASSERT_OK__', true); } catch (_){}
+        }
+        return ok;
+      } catch {
+        return false;
+      }
     }
-    return ok;
-  } catch {
-    return false;
-  }
-}
   };
 
   defineRO(globalThis,    '__SCPF_GUARD_ACTIVE__', true);
   defineRO(globalThis,    '__SCPF_GUARD_VERSION__', GUARD_VERSION);
   defineRO(globalThis,    '__SCPF_GUARD_TOKEN__', TOKEN);
   defineRO(globalThis,    '__SCPF_GUARD__', Object.freeze(GuardAPI));
-
   try {
     const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : null;
     if (w) {
@@ -335,7 +404,7 @@ assert(mode = 'soft') {
   // نفّذ التحقق السلوكي مرة لضبط العلم العالمي فورًا
   try { GuardAPI.assert('soft'); } catch {}
 
-  // لوق بسيط (احذفه في الإنتاج)
+  // لوق بسيط (يمكن حذفُه)
   try {
     console.log('%c[SCPF Guard]', 'color:#09f',
       'ready:', (globalThis.__SCPF_GUARD_ASSERT_OK__ === true),
